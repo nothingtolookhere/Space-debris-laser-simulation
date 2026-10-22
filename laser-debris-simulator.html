@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Laser Debris Simulator</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@600&family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;600&display=swap">
+<style>
+  :root {
+    --space: #02040a;
+    --panel: rgba(9, 14, 28, 0.88);
+    --line: #22304d;
+    --text: #e4e9f2;
+    --muted: #8a97ad;
+    --laser: #ff3d3d;
+    --sat: #5ad1ff;
+    --air: #ffa04d;
+    --title: "Chakra Petch", "Segoe UI", sans-serif;
+    --body: "IBM Plex Sans", "Segoe UI", sans-serif;
+    --data: "IBM Plex Mono", Consolas, monospace;
+    color-scheme: dark;
+  }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--space); color: var(--text); font-family: var(--body); }
+  canvas { display: block; }
+  #panel {
+    position: absolute; top: 16px; left: max(16px, env(safe-area-inset-left, 0px));
+    width: min(290px, calc(100% - 32px)); max-height: calc(100% - 32px); overflow-y: auto;
+    box-sizing: border-box; padding: 16px; display: flex; flex-direction: column; gap: 12px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px; font-size: 13px;
+  }
+  #panel > * { flex-shrink: 0; }
+  h1 { margin: 0; font-family: var(--title); font-size: 18px; letter-spacing: 0.04em; text-transform: uppercase; }
+  .readouts { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; font-family: var(--data); font-variant-numeric: tabular-nums; }
+  .readouts span { color: var(--muted); }
+  .bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+  #battery { height: 100%; width: 100%; background: var(--sat); }
+  #status { font-family: var(--data); font-weight: 600; min-height: 2.6em; }
+  button {
+    font: 600 13px var(--body); color: var(--text); background: var(--line);
+    border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; cursor: pointer;
+  }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--sat); outline-offset: 2px; }
+  #fire { background: #4a1015; border-color: var(--laser); color: #ffd7d7; padding: 12px; font-size: 14px; letter-spacing: 0.06em; touch-action: none; user-select: none; }
+  #fire.on { background: var(--laser); color: var(--space); }
+  .buttons { display: flex; gap: 8px; }
+  .buttons button { flex: 1; }
+  label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); }
+  label b { color: var(--text); font-family: var(--data); font-weight: 400; }
+  input[type=range] { width: 100%; accent-color: var(--sat); }
+  .check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
+  .key { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font-size: 12px; }
+  .key i { font-style: normal; }
+  @media (max-width: 600px) {
+    #panel { top: auto; bottom: 16px; max-height: 46%; }
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="panel">
+  <h1>Laser Debris Simulator</h1>
+  <div class="readouts">
+    <span>Time</span><b id="time">0 min</b>
+    <span>Altitude</span><b id="alt">800 km</b>
+    <span>Lowest point</span><b id="low">800 km</b>
+    <span>Highest point</span><b id="high">800 km</b>
+    <span>Speed</span><b id="speedOut">7.46 km/s</b>
+    <span>Pulses fired</span><b id="pulses">0</b>
+    <span>Laser sat height</span><b id="satAlt">800 km</b>
+    <span>Laser distance</span><b id="range">50 km</b>
+  </div>
+  <div>Battery</div>
+  <div class="bar"><div id="battery"></div></div>
+  <div id="status">Hold FIRE to slow the debris down</div>
+  <button id="fire">HOLD TO FIRE (Space)</button>
+  <label class="check"><input type="checkbox" id="auto"> Auto-fire</label>
+  <label>Time speed <b id="warpVal">100x</b><input type="range" id="warp" min="10" max="1000" step="10" value="100"></label>
+  <label>Laser energy per pulse <b id="energyVal">50 J</b><input type="range" id="energy" min="10" max="200" step="10" value="50"></label>
+  <label>Debris size (restarts) <b id="sizeVal">5 cm</b><input type="range" id="size" min="1" max="10" step="1" value="5"></label>
+  <div class="buttons"><button id="earthView">Earth view</button><button id="followView">Follow debris</button></div>
+  <div class="buttons"><button id="pause">Pause</button><button id="reset">Reset</button></div>
+  <div class="key">
+    <i style="color: var(--sat)">■ laser satellite</i>
+    <i style="color: #c9ced6">● debris</i>
+    <i style="color: var(--sat)">— shared orbit</i>
+    <i style="color: #c9ced6">— debris's new path</i>
+    <i style="color: var(--air)">orange = atmosphere</i>
+  </div>
+  <div class="key">Drag to rotate · scroll or pinch to zoom · satellite and debris drawn larger than real</div>
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+// ===================== PHYSICS SETTINGS =====================
+const MU = 3.986004418e14;    // Earth's gravity strength (m^3/s^2)
+const R_EARTH = 6371e3;       // Earth's radius (m)
+const ATMOSPHERE_KM = 200;    // below this height, air drag finishes the job
+const TARGET_KM = 180;        // auto-fire stops once the lowest point is below this
+const START_ALT_KM = 800;     // debris starting altitude (km)
+const INCLINATION_DEG = 50;   // tilt of the debris orbit compared with the equator
+const CM = 50e-6;             // momentum coupling: 50 micro-newton-seconds per joule
+const RATE_HZ = 10;           // laser pulses per second
+const SAT_ALT_KM = 800;       // the shared orbit: debris and laser satellite both start on this ring
+const LEAD_KM = 50;           // the satellite sits 50 km ahead of the debris on the shared orbit
+const FIRE_MIN = 5;           // a full battery lasts 5 minutes of firing
+const RECHARGE_MIN = 10;      // solar panels refill an empty battery in 10 minutes
+const EARTH_SPIN = 7.292e-5;  // Earth's rotation (radians per second)
+const S = 1e-6;               // drawing scale: 1 unit on screen = 1000 km
+const R_SAT = R_EARTH + SAT_ALT_KM * 1000;   // radius of the shared orbit (m)
+const SAT_SPEED = Math.sqrt(MU / R_SAT);     // speed on the shared orbit (m/s)
+const SAT_RATE = SAT_SPEED / R_SAT;          // how fast it goes round (radians per second)
+
+// ===================== SIMULATION STATE =====================
+let pos, vel, mass, t, pulses, battery, burned, firing, recharging;
+let satPos, satVel, satFree, burnTime;   // laser satellite position, velocity, and whether it is released
+let satAngle = 0;                        // where the satellite is around the shared orbit (radians)
+const ringP = new THREE.Vector3(), ringQ = new THREE.Vector3();   // two directions that span the orbit's flat plane
+let fireHeld = false, paused = false, flashStart = -1;
+
+function reset() {
+  const r = R_EARTH + START_ALT_KM * 1000;
+  const tilt = THREE.MathUtils.degToRad(INCLINATION_DEG);
+  pos = new THREE.Vector3(r, 0, 0);
+  vel = new THREE.Vector3(0, Math.sin(tilt), Math.cos(tilt)).multiplyScalar(Math.sqrt(MU / r));
+  ringP.copy(pos).normalize();
+  ringQ.copy(vel).normalize();
+  const sizeM = Number(sizeInput.value) / 100;
+  mass = 2700 * (Math.PI / 6) * sizeM ** 3;           // solid aluminium sphere (kg)
+  t = 0; pulses = 0; battery = 1; burned = false; firing = false; recharging = false;
+  satFree = false; burnTime = 0; flashStart = -1;
+  satAngle = debrisAngle() + LEAD_KM * 1000 / R_SAT;   // start 50 km ahead of the debris on the same ring
+  setSatellite();
+  drawSharedOrbit();
+  trailPoints.length = 0;
+  debris.visible = true;
+  debrisMarker.visible = true;
+  burnFlash.visible = false;
+}
+
+// gravity pulls toward Earth's centre; the laser pushes against the direction of travel
+function acceleration(p, v, isFiring) {
+  const a = p.clone().multiplyScalar(-MU / p.length() ** 3);
+  if (isFiring) {
+    const energy = Number(energyInput.value);
+    const push = CM * energy * RATE_HZ / mass;        // m/s^2 while firing
+    a.addScaledVector(v.clone().normalize(), -push);
+  }
+  return a;
+}
+
+function orbitInfo(p, v) {
+  const r = p.length(), speed = v.length();
+  const a = 1 / (2 / r - speed * speed / MU);          // vis-viva
+  const h = new THREE.Vector3().crossVectors(p, v);
+  const eVec = new THREE.Vector3().crossVectors(v, h).divideScalar(MU).sub(p.clone().divideScalar(r));
+  const e = eVec.length();
+  return { a, e, h, eVec,
+           lowKm: (a * (1 - e) - R_EARTH) / 1000,
+           highKm: (a * (1 + e) - R_EARTH) / 1000 };
+}
+
+// Where the debris is around the shared orbit (radians). The laser only pushes backwards,
+// so the debris never leaves the orbit's plane: it just sinks inside the ring.
+function debrisAngle() {
+  return Math.atan2(pos.dot(ringQ), pos.dot(ringP));
+}
+
+// The laser satellite is locked onto the shared orbit ring: same height, same plane, always.
+// Only its position around the ring (satAngle) changes.
+function setSatellite() {
+  const c = Math.cos(satAngle), s = Math.sin(satAngle);
+  satPos = ringP.clone().multiplyScalar(c).addScaledVector(ringQ, s).multiplyScalar(R_SAT);
+  satVel = ringP.clone().multiplyScalar(-s).addScaledVector(ringQ, c).multiplyScalar(SAT_SPEED);
+}
+
+function simulate(dt) {
+  firing = false;
+  if (!burned) {
+    // job done once the debris orbit dips low enough: release the satellite
+    if (!satFree && orbitInfo(pos, vel).lowKm <= TARGET_KM) satFree = true;
+    firing = (fireHeld || autoInput.checked) && !recharging && !satFree;
+
+    // velocity Verlet: half a push, move, half a push
+    vel.addScaledVector(acceleration(pos, vel, firing), dt / 2);
+    pos.addScaledVector(vel, dt);
+    vel.addScaledVector(acceleration(pos, vel, firing), dt / 2);
+
+    if (pos.length() - R_EARTH < ATMOSPHERE_KM * 1000) {
+      burned = true;
+      firing = false;
+      satFree = true;
+      burnTime = t;
+    }
+  }
+
+  if (satFree) {
+    // job done: the satellite simply keeps circling on the shared orbit
+    satAngle += SAT_RATE * dt;
+  } else {
+    // attacking: small thrusters slide it along its own ring to stay just ahead of the debris,
+    // but it never changes height or leaves the ring
+    satAngle = debrisAngle() + LEAD_KM * 1000 / R_SAT;
+  }
+  setSatellite();
+
+  if (firing) {
+    pulses += RATE_HZ * dt;
+    battery = Math.max(0, battery - dt / (FIRE_MIN * 60));
+    if (battery === 0) recharging = true;          // empty: laser locked until full again
+  } else {
+    battery = Math.min(1, battery + dt / (RECHARGE_MIN * 60));
+    if (battery === 1) recharging = false;
+  }
+  t += dt;
+  earth.rotation.y += EARTH_SPIN * dt;
+}
+
+// ===================== 3D SCENE =====================
+const sizeInput = document.getElementById("size");
+const energyInput = document.getElementById("energy");
+const autoInput = document.getElementById("auto");
+const warpInput = document.getElementById("warp");
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.0001, 3000);
+camera.position.set(4, 9, 22);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.minDistance = 0.02;
+controls.maxDistance = 200;
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+sun.position.set(30, 10, 20);
+scene.add(sun);
+
+// stars
+const starPositions = [];
+for (let i = 0; i < 3000; i++) {
+  const v = new THREE.Vector3().randomDirection().multiplyScalar(800 + Math.random() * 400);
+  starPositions.push(v.x, v.y, v.z);
+}
+const starGeo = new THREE.BufferGeometry();
+starGeo.setAttribute("position", new THREE.Float32BufferAttribute(starPositions, 3));
+scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 1.2, sizeAttenuation: false })));
+
+// Earth with latitude / longitude lines so you can see it spin
+const earth = new THREE.Group();
+earth.add(new THREE.Mesh(
+  new THREE.SphereGeometry(R_EARTH * S, 96, 64),
+  new THREE.MeshPhongMaterial({ color: 0x1d5fa8, shininess: 12 })
+));
+const gridMat = new THREE.LineBasicMaterial({ color: 0x9cc8ff, transparent: true, opacity: 0.25 });
+const gr = R_EARTH * S * 1.001;
+for (let lat = -60; lat <= 60; lat += 30) {
+  const pts = [];
+  for (let lon = 0; lon <= 360; lon += 5) {
+    const la = THREE.MathUtils.degToRad(lat), lo = THREE.MathUtils.degToRad(lon);
+    pts.push(new THREE.Vector3(gr * Math.cos(la) * Math.cos(lo), gr * Math.sin(la), gr * Math.cos(la) * Math.sin(lo)));
+  }
+  earth.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), gridMat));
+}
+for (let lon = 0; lon < 360; lon += 30) {
+  const pts = [];
+  for (let lat = -90; lat <= 90; lat += 5) {
+    const la = THREE.MathUtils.degToRad(lat), lo = THREE.MathUtils.degToRad(lon);
+    pts.push(new THREE.Vector3(gr * Math.cos(la) * Math.cos(lo), gr * Math.sin(la), gr * Math.cos(la) * Math.sin(lo)));
+  }
+  earth.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), gridMat));
+}
+scene.add(earth);
+
+// atmosphere shell at 200 km
+scene.add(new THREE.Mesh(
+  new THREE.SphereGeometry((R_EARTH + ATMOSPHERE_KM * 1000) * S, 96, 64),
+  new THREE.MeshBasicMaterial({ color: 0xffa04d, transparent: true, opacity: 0.12, depthWrite: false })
+));
+
+// debris: a small metal fragment plus a marker that stays visible when zoomed out
+const debris = new THREE.Mesh(
+  new THREE.IcosahedronGeometry(0.0015, 0),
+  new THREE.MeshStandardMaterial({ color: 0xc9ced6, metalness: 0.8, roughness: 0.35, flatShading: true })
+);
+scene.add(debris);
+const debrisMarker = makeMarker(0xc9ced6, 7, true);
+scene.add(debrisMarker);
+
+// laser satellite: body, two solar panels and a laser barrel on a swivel (turret).
+// The body stays level on its orbit (top away from Earth, back facing the debris);
+// only the turret turns to aim the laser.
+const laserSat = new THREE.Group();
+laserSat.add(new THREE.Mesh(new THREE.BoxGeometry(0.004, 0.004, 0.006),
+  new THREE.MeshStandardMaterial({ color: 0xd4a843, metalness: 0.7, roughness: 0.4 })));
+const panelMat = new THREE.MeshStandardMaterial({ color: 0x1e3f8a, metalness: 0.3, roughness: 0.5 });
+for (const side of [-1, 1]) {
+  const panel = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.0003, 0.004), panelMat);
+  panel.position.x = side * 0.009;
+  laserSat.add(panel);
+}
+const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.0007, 0.0009, 0.004, 16),
+  new THREE.MeshStandardMaterial({ color: 0x555b66, metalness: 0.9, roughness: 0.3 }));
+barrel.rotation.x = Math.PI / 2;
+barrel.position.z = 0.005;
+const turret = new THREE.Group();
+turret.add(barrel);
+laserSat.add(turret);
+scene.add(laserSat);
+const satMarker = makeMarker(0x5ad1ff, 8);
+scene.add(satMarker);
+
+// the shared orbit: a fixed ring at 800 km that the laser satellite never leaves
+const ringGeo = new THREE.BufferGeometry();
+scene.add(new THREE.LineLoop(ringGeo, new THREE.LineBasicMaterial({ color: 0x5ad1ff, transparent: true, opacity: 0.7 })));
+function drawSharedOrbit() {
+  const pts = [];
+  for (let i = 0; i < 360; i++) {
+    const a = THREE.MathUtils.degToRad(i);
+    pts.push(ringP.clone().multiplyScalar(Math.cos(a)).addScaledVector(ringQ, Math.sin(a)).multiplyScalar(R_SAT * S));
+  }
+  ringGeo.setFromPoints(pts);
+}
+
+// burn-up flash: a glowing ball that swells and fades where the debris hits the atmosphere
+const burnFlash = makeMarker(0xffa04d, 10, true);
+burnFlash.material.blending = THREE.AdditiveBlending;
+scene.add(burnFlash);
+
+// laser beam: a thin red cylinder stretched between the barrel and the debris
+const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.0003, 0.0003, 1, 8),
+  new THREE.MeshBasicMaterial({ color: 0xff3d3d }));
+scene.add(beam);
+const glow = new THREE.Mesh(new THREE.SphereGeometry(0.0025, 16, 16),
+  new THREE.MeshBasicMaterial({ color: 0xffa04d, transparent: true, opacity: 0.7 }));
+scene.add(glow);
+
+// the debris's new path (the ellipse it would follow if nothing pushed it);
+// it only appears once the debris has been knocked off the shared orbit
+const ORBIT_POINTS = 360;
+const orbitGeo = new THREE.BufferGeometry();
+orbitGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(ORBIT_POINTS * 3), 3));
+const orbitLine = new THREE.LineLoop(orbitGeo, new THREE.LineBasicMaterial({ color: 0x8a97ad }));
+scene.add(orbitLine);
+
+// trail of where the debris has been
+const trailPoints = [];
+const trailGeo = new THREE.BufferGeometry();
+const trailLine = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 }));
+scene.add(trailLine);
+
+// a marker that stays the same size on screen however far you zoom out (square, or a soft round dot)
+function makeMarker(color, size, round = false) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute([0, 0, 0], 3));
+  const mat = new THREE.PointsMaterial({ color, size, sizeAttenuation: false });
+  if (round) {
+    const c = document.createElement("canvas");
+    c.width = c.height = 64;
+    const g = c.getContext("2d");
+    const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grad.addColorStop(0, "rgba(255,255,255,1)");
+    grad.addColorStop(0.5, "rgba(255,255,255,0.9)");
+    grad.addColorStop(1, "rgba(255,255,255,0)");
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 64, 64);
+    mat.map = new THREE.CanvasTexture(c);
+    mat.transparent = true;
+    mat.depthWrite = false;
+  }
+  return new THREE.Points(geo, mat);
+}
+
+function updateOrbitLine(o) {
+  const P = o.e > 1e-7 ? o.eVec.clone().normalize() : pos.clone().normalize();
+  const Q = new THREE.Vector3().crossVectors(o.h, P).normalize();
+  const p = o.a * (1 - o.e * o.e);
+  const arr = orbitGeo.attributes.position.array;
+  for (let i = 0; i < ORBIT_POINTS; i++) {
+    const nu = (i / ORBIT_POINTS) * Math.PI * 2;
+    const r = p / (1 + o.e * Math.cos(nu)) * S;
+    arr[i * 3]     = (P.x * Math.cos(nu) + Q.x * Math.sin(nu)) * r;
+    arr[i * 3 + 1] = (P.y * Math.cos(nu) + Q.y * Math.sin(nu)) * r;
+    arr[i * 3 + 2] = (P.z * Math.cos(nu) + Q.z * Math.sin(nu)) * r;
+  }
+  orbitGeo.attributes.position.needsUpdate = true;
+  orbitLine.material.color.set(o.lowKm < ATMOSPHERE_KM ? 0xffa04d : 0xc9ced6);
+  orbitLine.visible = !burned && o.lowKm < SAT_ALT_KM - 2;   // hidden while it still matches the shared orbit
+}
+
+// ===================== DRAW EACH FRAME =====================
+const lastTarget = new THREE.Vector3();
+const bodyFrame = new THREE.Matrix4();
+const Z_AXIS = new THREE.Vector3(0, 0, 1);
+let followMode = false;
+
+function draw() {
+  const d = pos.clone().multiplyScalar(S);
+  const sat = satPos.clone().multiplyScalar(S);
+
+  debris.position.copy(d);
+  debris.rotation.x += 0.02; debris.rotation.y += 0.03;
+  debrisMarker.position.copy(d);
+  laserSat.position.copy(sat);
+  satMarker.position.copy(sat);
+
+  // keep the satellite body level on its orbit: top away from Earth, back facing the way it came
+  const up = satPos.clone().normalize();
+  const back = satVel.clone().normalize().negate();
+  bodyFrame.makeBasis(new THREE.Vector3().crossVectors(up, back), up, back);
+  laserSat.quaternion.setFromRotationMatrix(bodyFrame);
+  // swivel only the laser barrel towards the debris (straight back once the job is over)
+  const aim = burned ? Z_AXIS.clone()
+    : d.clone().sub(sat).normalize().applyQuaternion(laserSat.quaternion.clone().invert());
+  turret.quaternion.setFromUnitVectors(Z_AXIS, aim);
+
+  // beam from the barrel tip to the debris
+  const tip = sat.clone().addScaledVector(d.clone().sub(sat).normalize(), 0.007);
+  const beamVec = d.clone().sub(tip);
+  beam.visible = firing;
+  glow.visible = firing;
+  if (firing) {
+    beam.position.copy(tip).addScaledVector(beamVec, 0.5);
+    beam.scale.set(1, beamVec.length(), 1);
+    beam.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), beamVec.clone().normalize());
+    glow.position.copy(d);
+    glow.scale.setScalar(0.7 + Math.random() * 0.6);
+  }
+
+  if (!burned && (trailPoints.length === 0 || trailPoints[trailPoints.length - 1].distanceTo(d) > 0.02)) {
+    trailPoints.push(d.clone());
+    if (trailPoints.length > 400) trailPoints.shift();
+    trailGeo.setFromPoints(trailPoints);
+  }
+
+  const o = orbitInfo(pos, vel);
+  updateOrbitLine(o);
+
+  const focus = burned ? sat : d;                 // after burn-up the camera follows the satellite
+  if (followMode) {
+    camera.position.add(focus.clone().sub(lastTarget));
+    controls.target.copy(focus);
+  }
+  lastTarget.copy(focus);
+
+  // readouts
+  const altKm = (pos.length() - R_EARTH) / 1000;
+  document.getElementById("time").textContent = (t / 60).toFixed(0) + " min";
+  document.getElementById("alt").textContent = altKm.toFixed(0) + " km";
+  document.getElementById("low").textContent = o.lowKm.toFixed(0) + " km";
+  document.getElementById("high").textContent = o.highKm.toFixed(0) + " km";
+  document.getElementById("speedOut").textContent = (vel.length() / 1000).toFixed(2) + " km/s";
+  document.getElementById("pulses").textContent = Math.round(pulses).toLocaleString();
+  document.getElementById("satAlt").textContent = ((satPos.length() - R_EARTH) / 1000).toFixed(0) + " km";
+  document.getElementById("range").textContent = burned ? "-" : (satPos.distanceTo(pos) / 1000).toFixed(0) + " km";
+  const bar = document.getElementById("battery");
+  bar.style.width = (battery * 100).toFixed(0) + "%";
+  bar.style.background = battery > 0.2 ? "var(--sat)" : "var(--laser)";
+  document.getElementById("fire").classList.toggle("on", firing);
+
+  // burn-up flash: swells and fades over 2 seconds where the debris hit the atmosphere
+  if (burned) {
+    if (flashStart < 0) { flashStart = performance.now(); burnFlash.position.copy(d); }
+    const k = (performance.now() - flashStart) / 2000;
+    burnFlash.visible = k < 1;
+    burnFlash.material.size = 10 + 50 * k;
+    burnFlash.material.opacity = 1 - k;
+  }
+
+  const status = document.getElementById("status");
+  const offOrbit = o.lowKm < SAT_ALT_KM - 2;
+  if (burned) {
+    status.textContent = `BURNED UP after ${Math.round(pulses).toLocaleString()} pulses and ${(burnTime / 60).toFixed(0)} min. Laser satellite still on the shared orbit.`;
+    status.style.color = "var(--air)";
+    debris.visible = false;
+    debrisMarker.visible = false;
+  } else if (firing) {
+    status.textContent = offOrbit ? "FIRING: debris is dropping off the shared orbit" : "FIRING: slowing the debris";
+    status.style.color = "var(--laser)";
+  } else if (recharging) {
+    status.textContent = "Battery empty: recharging from solar panels";
+    status.style.color = "var(--muted)";
+  } else if (satFree) {
+    status.textContent = "Knocked out: debris has left the shared orbit and is falling. Laser satellite stays on its orbit.";
+    status.style.color = "var(--air)";
+  } else {
+    status.textContent = "Hold FIRE to slow the debris down";
+    status.style.color = "var(--text)";
+  }
+}
+
+// ===================== MAIN LOOP =====================
+let last = performance.now();
+function animate(now) {
+  requestAnimationFrame(animate);
+  const realDt = Math.min((now - last) / 1000, 0.1);
+  last = now;
+  if (!paused) {
+    let simDt = realDt * Number(warpInput.value);
+    while (simDt > 0) {
+      const dt = Math.min(2, simDt);                    // small steps keep the orbit accurate
+      simulate(dt);
+      simDt -= dt;
+    }
+  }
+  draw();
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+// ===================== CONTROLS =====================
+const fireBtn = document.getElementById("fire");
+fireBtn.addEventListener("pointerdown", (e) => { fireHeld = true; fireBtn.setPointerCapture(e.pointerId); });
+fireBtn.addEventListener("pointerup", () => { fireHeld = false; });
+fireBtn.addEventListener("pointercancel", () => { fireHeld = false; });
+window.addEventListener("keydown", (e) => { if (e.code === "Space") { fireHeld = true; e.preventDefault(); } });
+window.addEventListener("keyup", (e) => { if (e.code === "Space") fireHeld = false; });
+
+warpInput.addEventListener("input", () => { document.getElementById("warpVal").textContent = warpInput.value + "x"; });
+energyInput.addEventListener("input", () => { document.getElementById("energyVal").textContent = energyInput.value + " J"; });
+sizeInput.addEventListener("input", () => { document.getElementById("sizeVal").textContent = sizeInput.value + " cm"; reset(); });
+
+document.getElementById("earthView").addEventListener("click", () => {
+  followMode = false;
+  controls.target.set(0, 0, 0);
+  camera.position.set(4, 9, 22);
+});
+document.getElementById("followView").addEventListener("click", () => {
+  followMode = true;
+  const p = burned ? satPos : pos, v = burned ? satVel : vel;
+  const d = p.clone().multiplyScalar(S);
+  const up = p.clone().normalize();
+  const side = new THREE.Vector3().crossVectors(v, p).normalize();
+  const behind = v.clone().normalize().multiplyScalar(-0.06);
+  camera.position.copy(d).add(behind).addScaledVector(up, 0.03).addScaledVector(side, 0.06);
+  controls.target.copy(d);
+  lastTarget.copy(d);
+});
+const pauseBtn = document.getElementById("pause");
+pauseBtn.addEventListener("click", () => { paused = !paused; pauseBtn.textContent = paused ? "Resume" : "Pause"; });
+document.getElementById("reset").addEventListener("click", reset);
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+reset();
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>
