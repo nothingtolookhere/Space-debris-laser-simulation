@@ -35,6 +35,8 @@
   .bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
   #battery { height: 100%; width: 100%; background: var(--sat); }
   #status { font-family: var(--data); font-weight: 600; min-height: 2.6em; }
+  #graph { width: 100%; height: 70px; background: #050913; border: 1px solid var(--line); border-radius: 4px; box-sizing: border-box; }
+  .graphKey { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-top: -8px; }
   button {
     font: 600 13px var(--body); color: var(--text); background: var(--line);
     border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; cursor: pointer;
@@ -73,11 +75,16 @@
     <span>Highest point</span><b id="high">800 km</b>
     <span>Speed</span><b id="speedOut">7.46 km/s</b>
     <span>Pulses fired</span><b id="pulses">0</b>
+    <span>Energy used</span><b id="energyUsedOut">0 kJ</b>
     <span>Laser sat height</span><b id="satAlt">800 km</b>
     <span>Laser distance</span><b id="range">50 km</b>
+    <span>Solar power</span><b id="power">Sunlight</b>
   </div>
   <div>Battery</div>
   <div class="bar"><div id="battery"></div></div>
+  <div>Lowest point over time</div>
+  <canvas id="graph" width="256" height="70"></canvas>
+  <div class="graphKey"><span style="color: var(--sat)">— lowest point</span><span style="color: var(--air)">— atmosphere (200 km)</span></div>
   <div id="status">Hold FIRE to slow the debris down</div>
   <button id="fire">HOLD TO FIRE (Space)</button>
   <label class="check"><input type="checkbox" id="auto"> Auto-fire</label>
@@ -112,19 +119,25 @@ const RATE_HZ = 10;           // laser pulses per second
 const SAT_ALT_KM = 800;       // the shared orbit: debris and laser satellite both start on this ring
 const LEAD_KM = 50;           // the satellite sits 50 km ahead of the debris on the shared orbit
 const FIRE_MIN = 5;           // a full battery lasts 5 minutes of firing
-const RECHARGE_MIN = 10;      // solar panels refill an empty battery in 10 minutes
+const RECHARGE_MIN = 10;      // solar panels refill an empty battery in 10 minutes (in sunlight)
 const EARTH_SPIN = 7.292e-5;  // Earth's rotation (radians per second)
+const DRAG_CD = 2.2;          // drag coefficient of a small tumbling fragment
+const RHO_200 = 2.5e-10;      // air density at 200 km (kg/m^3)
+const SCALE_H = 50e3;         // air gets ~2.7x thinner every 50 km higher (m)
 const S = 1e-6;               // drawing scale: 1 unit on screen = 1000 km
 const R_SAT = R_EARTH + SAT_ALT_KM * 1000;   // radius of the shared orbit (m)
 const SAT_SPEED = Math.sqrt(MU / R_SAT);     // speed on the shared orbit (m/s)
 const SAT_RATE = SAT_SPEED / R_SAT;          // how fast it goes round (radians per second)
+const SUN_DIR = new THREE.Vector3(30, 10, 20).normalize();   // direction to the Sun (matches the scene light)
 
 // ===================== SIMULATION STATE =====================
-let pos, vel, mass, t, pulses, battery, burned, firing, recharging;
+let pos, vel, mass, area, t, pulses, energyUsed, battery, burned, firing, recharging;
 let satPos, satVel, satFree, burnTime;   // laser satellite position, velocity, and whether it is released
 let satAngle = 0;                        // where the satellite is around the shared orbit (radians)
 const ringP = new THREE.Vector3(), ringQ = new THREE.Vector3();   // two directions that span the orbit's flat plane
 let fireHeld = false, paused = false, flashStart = -1;
+const history = [];                      // lowest point (km) sampled over time, for the graph
+let lastSample = -Infinity;
 
 function reset() {
   const r = R_EARTH + START_ALT_KM * 1000;
@@ -135,25 +148,35 @@ function reset() {
   ringQ.copy(vel).normalize();
   const sizeM = Number(sizeInput.value) / 100;
   mass = 2700 * (Math.PI / 6) * sizeM ** 3;           // solid aluminium sphere (kg)
-  t = 0; pulses = 0; battery = 1; burned = false; firing = false; recharging = false;
+  area = Math.PI * (sizeM / 2) ** 2;                  // cross-section the air hits (m^2)
+  t = 0; pulses = 0; energyUsed = 0; battery = 1; burned = false; firing = false; recharging = false;
   satFree = false; burnTime = 0; flashStart = -1;
   satAngle = debrisAngle() + LEAD_KM * 1000 / R_SAT;   // start 50 km ahead of the debris on the same ring
   setSatellite();
   drawSharedOrbit();
   trailPoints.length = 0;
+  history.length = 0;
+  lastSample = -Infinity;
   debris.visible = true;
   debrisMarker.visible = true;
   burnFlash.visible = false;
 }
 
-// gravity pulls toward Earth's centre; the laser pushes against the direction of travel
+// Forces on the debris:
+//  - gravity pulls toward Earth's centre
+//  - the laser pushes along the beam, from the satellite towards the debris
+//    (backwards, and downwards once the debris has sunk below the satellite)
+//  - air drag slows it down, getting much stronger the lower it goes
 function acceleration(p, v, isFiring) {
   const a = p.clone().multiplyScalar(-MU / p.length() ** 3);
   if (isFiring) {
-    const energy = Number(energyInput.value);
-    const push = CM * energy * RATE_HZ / mass;        // m/s^2 while firing
-    a.addScaledVector(v.clone().normalize(), -push);
+    const push = CM * Number(energyInput.value) * RATE_HZ / mass;   // m/s^2 while firing
+    const beamDir = p.clone().sub(satPos).normalize();
+    a.addScaledVector(beamDir, push);
   }
+  const h = p.length() - R_EARTH;
+  const rho = RHO_200 * Math.exp(-(h - ATMOSPHERE_KM * 1000) / SCALE_H);
+  a.addScaledVector(v, -0.5 * rho * v.length() * DRAG_CD * area / mass);
   return a;
 }
 
@@ -168,8 +191,8 @@ function orbitInfo(p, v) {
            highKm: (a * (1 + e) - R_EARTH) / 1000 };
 }
 
-// Where the debris is around the shared orbit (radians). The laser only pushes backwards,
-// so the debris never leaves the orbit's plane: it just sinks inside the ring.
+// Where the debris is around the shared orbit (radians). The satellite is always in the same plane
+// as the debris, so the laser never pushes it out of the plane: it just sinks inside the ring.
 function debrisAngle() {
   return Math.atan2(pos.dot(ringQ), pos.dot(ringP));
 }
@@ -180,6 +203,12 @@ function setSatellite() {
   const c = Math.cos(satAngle), s = Math.sin(satAngle);
   satPos = ringP.clone().multiplyScalar(c).addScaledVector(ringQ, s).multiplyScalar(R_SAT);
   satVel = ringP.clone().multiplyScalar(-s).addScaledVector(ringQ, c).multiplyScalar(SAT_SPEED);
+}
+
+// Is this point lit by the Sun, or hidden in Earth's shadow (a cylinder behind Earth)?
+function inSunlight(p) {
+  const along = p.dot(SUN_DIR);
+  return along > 0 || p.clone().addScaledVector(SUN_DIR, -along).length() > R_EARTH;
 }
 
 function simulate(dt) {
@@ -214,9 +243,11 @@ function simulate(dt) {
 
   if (firing) {
     pulses += RATE_HZ * dt;
+    energyUsed += Number(energyInput.value) * RATE_HZ * dt;
     battery = Math.max(0, battery - dt / (FIRE_MIN * 60));
     if (battery === 0) recharging = true;          // empty: laser locked until full again
-  } else {
+  } else if (inSunlight(satPos)) {
+    // solar panels only charge when the satellite is out of Earth's shadow
     battery = Math.min(1, battery + dt / (RECHARGE_MIN * 60));
     if (battery === 1) recharging = false;
   }
@@ -245,7 +276,7 @@ controls.maxDistance = 200;
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.35));
 const sun = new THREE.DirectionalLight(0xffffff, 1.6);
-sun.position.set(30, 10, 20);
+sun.position.copy(SUN_DIR).multiplyScalar(37);
 scene.add(sun);
 
 // stars
@@ -258,13 +289,21 @@ const starGeo = new THREE.BufferGeometry();
 starGeo.setAttribute("position", new THREE.Float32BufferAttribute(starPositions, 3));
 scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 1.2, sizeAttenuation: false })));
 
-// Earth with latitude / longitude lines so you can see it spin
+// Earth with a real map (falls back to plain blue if the image can't load),
+// plus faint latitude / longitude lines so you can see it spin
 const earth = new THREE.Group();
-earth.add(new THREE.Mesh(
-  new THREE.SphereGeometry(R_EARTH * S, 96, 64),
-  new THREE.MeshPhongMaterial({ color: 0x1d5fa8, shininess: 12 })
-));
-const gridMat = new THREE.LineBasicMaterial({ color: 0x9cc8ff, transparent: true, opacity: 0.25 });
+const earthMat = new THREE.MeshPhongMaterial({ color: 0x1d5fa8, shininess: 12 });
+new THREE.TextureLoader().load(
+  "https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/earth_atmos_2048.jpg",
+  (tex) => {
+    tex.colorSpace = THREE.SRGBColorSpace;
+    earthMat.map = tex;
+    earthMat.color.set(0xffffff);
+    earthMat.needsUpdate = true;
+  }
+);
+earth.add(new THREE.Mesh(new THREE.SphereGeometry(R_EARTH * S, 96, 64), earthMat));
+const gridMat = new THREE.LineBasicMaterial({ color: 0x9cc8ff, transparent: true, opacity: 0.12 });
 const gr = R_EARTH * S * 1.001;
 for (let lat = -60; lat <= 60; lat += 30) {
   const pts = [];
@@ -400,6 +439,30 @@ function updateOrbitLine(o) {
   orbitLine.visible = !burned && o.lowKm < SAT_ALT_KM - 2;   // hidden while it still matches the shared orbit
 }
 
+// ===================== GRAPH: LOWEST POINT OVER TIME =====================
+const graph = document.getElementById("graph").getContext("2d");
+const GRAPH_W = 256, GRAPH_H = 70, GRAPH_MAX_KM = 900;
+function drawGraph(lowKm) {
+  if (!burned && t - lastSample >= 30) {           // one sample every 30 simulated seconds
+    history.push(lowKm);
+    lastSample = t;
+    if (history.length > GRAPH_W) history.shift();
+  }
+  const y = (km) => GRAPH_H - (Math.max(0, Math.min(GRAPH_MAX_KM, km)) / GRAPH_MAX_KM) * GRAPH_H;
+  graph.clearRect(0, 0, GRAPH_W, GRAPH_H);
+  graph.lineWidth = 1;
+  graph.strokeStyle = "#ffa04d";
+  graph.beginPath();
+  graph.moveTo(0, y(ATMOSPHERE_KM));
+  graph.lineTo(GRAPH_W, y(ATMOSPHERE_KM));
+  graph.stroke();
+  graph.lineWidth = 2;
+  graph.strokeStyle = "#5ad1ff";
+  graph.beginPath();
+  history.forEach((v, i) => (i ? graph.lineTo(i, y(v)) : graph.moveTo(i, y(v))));
+  graph.stroke();
+}
+
 // ===================== DRAW EACH FRAME =====================
 const lastTarget = new THREE.Vector3();
 const bodyFrame = new THREE.Matrix4();
@@ -447,6 +510,7 @@ function draw() {
 
   const o = orbitInfo(pos, vel);
   updateOrbitLine(o);
+  drawGraph(o.lowKm);
 
   const focus = burned ? sat : d;                 // after burn-up the camera follows the satellite
   if (followMode) {
@@ -456,6 +520,7 @@ function draw() {
   lastTarget.copy(focus);
 
   // readouts
+  const sunlit = inSunlight(satPos);
   const altKm = (pos.length() - R_EARTH) / 1000;
   document.getElementById("time").textContent = (t / 60).toFixed(0) + " min";
   document.getElementById("alt").textContent = altKm.toFixed(0) + " km";
@@ -463,8 +528,12 @@ function draw() {
   document.getElementById("high").textContent = o.highKm.toFixed(0) + " km";
   document.getElementById("speedOut").textContent = (vel.length() / 1000).toFixed(2) + " km/s";
   document.getElementById("pulses").textContent = Math.round(pulses).toLocaleString();
+  document.getElementById("energyUsedOut").textContent = Math.round(energyUsed / 1000).toLocaleString() + " kJ";
   document.getElementById("satAlt").textContent = ((satPos.length() - R_EARTH) / 1000).toFixed(0) + " km";
   document.getElementById("range").textContent = burned ? "-" : (satPos.distanceTo(pos) / 1000).toFixed(0) + " km";
+  const power = document.getElementById("power");
+  power.textContent = sunlit ? "Sunlight" : "Earth's shadow";
+  power.style.color = sunlit ? "var(--text)" : "var(--muted)";
   const bar = document.getElementById("battery");
   bar.style.width = (battery * 100).toFixed(0) + "%";
   bar.style.background = battery > 0.2 ? "var(--sat)" : "var(--laser)";
@@ -482,7 +551,7 @@ function draw() {
   const status = document.getElementById("status");
   const offOrbit = o.lowKm < SAT_ALT_KM - 2;
   if (burned) {
-    status.textContent = `BURNED UP after ${Math.round(pulses).toLocaleString()} pulses and ${(burnTime / 60).toFixed(0)} min. Laser satellite still on the shared orbit.`;
+    status.textContent = `BURNED UP after ${Math.round(pulses).toLocaleString()} pulses (${Math.round(energyUsed / 1000).toLocaleString()} kJ) and ${(burnTime / 60).toFixed(0)} min. Laser satellite still on the shared orbit.`;
     status.style.color = "var(--air)";
     debris.visible = false;
     debrisMarker.visible = false;
@@ -490,10 +559,11 @@ function draw() {
     status.textContent = offOrbit ? "FIRING: debris is dropping off the shared orbit" : "FIRING: slowing the debris";
     status.style.color = "var(--laser)";
   } else if (recharging) {
-    status.textContent = "Battery empty: recharging from solar panels";
+    status.textContent = sunlit ? "Battery empty: recharging from solar panels"
+                                : "Battery empty: in Earth's shadow, waiting for sunlight";
     status.style.color = "var(--muted)";
   } else if (satFree) {
-    status.textContent = "Knocked out: debris has left the shared orbit and is falling. Laser satellite stays on its orbit.";
+    status.textContent = "Knocked out: debris has left the shared orbit and air drag is pulling it down. Laser satellite stays on its orbit.";
     status.style.color = "var(--air)";
   } else {
     status.textContent = "Hold FIRE to slow the debris down";
